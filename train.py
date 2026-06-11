@@ -1,5 +1,5 @@
 """
-MiniGPT — 基于《西游记》训练一个字符级小 GPT。
+MiniGPT — 基于李白诗歌训练一个字符级小 GPT。
 
 架构和方法来自: https://mcell.top/books/the-roads-for-llm/train-small-gpt
 """
@@ -121,13 +121,16 @@ class MiniGPT(nn.Module):
         return logits
 
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=1.0):
-        """自回归生成。"""
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+        """自回归生成。top_k 只在概率最高的 k 个字中采样，过滤长尾乱码。"""
         for _ in range(max_new_tokens):
             # 截断到 block_size
             idx_cond = idx[:, -self.block_size:]
             logits = self(idx_cond)
             logits = logits[:, -1, :] / temperature
+            if top_k is not None:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = -float('inf')
             probs = F.softmax(logits, dim=-1)
             idx_next = torch.multinomial(probs, num_samples=1)
             idx = torch.cat((idx, idx_next), dim=1)
@@ -195,7 +198,7 @@ def train(model, data, tokenizer, epochs=100, batch_size=32,
             # 随机取一段上下文作为 prompt
             start = torch.randint(0, len(data) - 10, (1,))
             context = data[start:start + 10].unsqueeze(0).to(device)
-            gen = model.generate(context, max_new_tokens=80, temperature=0.8)
+            gen = model.generate(context, max_new_tokens=80, temperature=0.8, top_k=40)
             sample = tokenizer.decode(gen[0].tolist())
             print(f"  [生成样本] {sample}")
             print()
@@ -214,12 +217,13 @@ if __name__ == "__main__":
     print(f"词汇表大小: {tokenizer.vocab_size}")
 
     # 3. 创建模型
+    block_size = 128  # 诗短，128 字足够覆盖整首；训练与推理共用此值
     model = MiniGPT(
         vocab_size=tokenizer.vocab_size,
         d_model=256,
         n_heads=8,
         n_layers=6,
-        block_size=256,
+        block_size=block_size,
     )
     n_params = sum(p.numel() for p in model.parameters())
     print(f"模型参数: {n_params / 1e6:.1f}M")
@@ -236,11 +240,11 @@ if __name__ == "__main__":
     else:
         device = 'cpu'
     print(f"训练设备: {device}")
-    print(f"每轮步数: {len(data) // (32 * 128)}")
+    print(f"每轮步数: {len(data) // (32 * block_size)}")
     print()
 
     # 5. 训练
-    train(model, data, tokenizer, epochs=100, device=device)
+    train(model, data, tokenizer, epochs=100, block_size=block_size, device=device)
 
     # 6. 保存
     torch.save(model.state_dict(), "minigpt.pt")

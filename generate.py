@@ -1,5 +1,5 @@
 """
-交互式生成脚本 — 加载训练好的 MiniGPT 模型，输入 prompt 生成 西游记 风格文字。
+交互式生成脚本 — 加载训练好的 MiniGPT 模型，输入 prompt 生成李白诗风格文字。
 """
 
 import torch
@@ -13,7 +13,7 @@ def main():
 
     # 创建模型并加载权重
     device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
-    model = MiniGPT(vocab_size=tokenizer.vocab_size, block_size=256)
+    model = MiniGPT(vocab_size=tokenizer.vocab_size, block_size=128)
     model.load_state_dict(torch.load("minigpt.pt", map_location=device, weights_only=True))
     model.to(device)
     model.eval()
@@ -28,7 +28,7 @@ def main():
         if prompt.lower() == 'quit':
             break
         if not prompt:
-            prompt = "行者"
+            prompt = "明月"
 
         # 编码 prompt
         ids = tokenizer.encode(prompt)
@@ -36,8 +36,8 @@ def main():
             ids = ids[-model.block_size:]
         context = torch.tensor([ids], dtype=torch.long).to(device)
 
-        # 生成
-        gen = model.generate(context, max_new_tokens=200, temperature=0.8)
+        # 生成（max_new_tokens 控制在 block_size 内，避免落入位置外推区）
+        gen = model.generate(context, max_new_tokens=120, temperature=0.8, top_k=40)
         output = tokenizer.decode(gen[0].tolist())
         print(f"\n{output}\n")
 
