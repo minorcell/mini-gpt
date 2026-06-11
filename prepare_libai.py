@@ -10,6 +10,8 @@ import json
 import os
 import time
 
+from clean import clean_text
+
 try:
     import opencc
     _T2S = opencc.OpenCC("t2s")
@@ -36,7 +38,7 @@ def clean_line(line):
     line = line.strip()
     if _T2S:
         line = _T2S.convert(line)
-    return line
+    return clean_text(line)
 
 
 def main():
@@ -69,6 +71,7 @@ def main():
                 title = item.get("title", "") or ""
                 if _T2S:
                     title = _T2S.convert(title)
+                title = clean_text(title)
                 paragraphs = item.get("paragraphs", [])
 
                 lines = []

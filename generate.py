@@ -3,13 +3,12 @@
 """
 
 import torch
-from train import MiniGPT, CharTokenizer, load_data
+from train import MiniGPT, CharTokenizer, VOCAB_PATH
 
 
 def main():
-    # 加载语料构建分词器
-    text = load_data("datas/corpus_libai.txt")
-    tokenizer = CharTokenizer(text)
+    # 加载共享词表（与训练时一致，保证 embedding 对齐）
+    tokenizer = CharTokenizer.load(VOCAB_PATH)
 
     # 创建模型并加载权重
     device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'

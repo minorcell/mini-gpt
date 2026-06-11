@@ -4,7 +4,9 @@ MiniGPT — 基于李白诗歌训练一个字符级小 GPT。
 架构和方法来自: https://mcell.top/books/the-roads-for-llm/train-small-gpt
 """
 
+import json
 import math
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -13,13 +15,38 @@ import torch.nn.functional as F
 # ── 分词器 ───────────────────────────────────────────────
 
 class CharTokenizer:
-    """字符级分词器：每个字符映射为一个整数 ID。"""
+    """字符级分词器：每个字符映射为一个整数 ID。
 
-    def __init__(self, text):
-        chars = sorted(list(set(text)))
+    两阶段训练需要预训练与微调共享同一词表，故支持从多语料并集
+    构建（from_corpora）并持久化到磁盘（save/load）。
+    """
+
+    def __init__(self, chars):
+        # chars 可以是一段文本，也可以是已排序的字符列表
+        if isinstance(chars, str):
+            chars = sorted(set(chars))
         self.stoi = {ch: i for i, ch in enumerate(chars)}  # string → int
         self.itos = {i: ch for i, ch in enumerate(chars)}  # int → string
         self.vocab_size = len(chars)
+
+    @classmethod
+    def from_corpora(cls, filepaths):
+        """从多个语料文件的字符并集构建词表（用于共享词表）。"""
+        chars = set()
+        for fp in filepaths:
+            chars |= set(load_data(fp))
+        return cls(sorted(chars))
+
+    def save(self, path):
+        chars = [self.itos[i] for i in range(self.vocab_size)]
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(chars, f, ensure_ascii=False)
+
+    @classmethod
+    def load(cls, path):
+        with open(path, encoding='utf-8') as f:
+            chars = json.load(f)
+        return cls(chars)
 
     def encode(self, s):
         return [self.stoi[ch] for ch in s if ch in self.stoi]
@@ -150,9 +177,10 @@ def get_lr(it, warmup, total, max_lr):
 
 
 def train(model, data, tokenizer, epochs=100, batch_size=32,
-          block_size=128, lr=3e-4, device='cpu'):
+          block_size=128, lr=3e-4, device='cpu', weight_decay=0.1):
     model = model.to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.95))
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr,
+                                  betas=(0.9, 0.95), weight_decay=weight_decay)
     steps_per_epoch = len(data) // (batch_size * block_size)
     total_steps = epochs * steps_per_epoch
     warmup = total_steps // 10  # 前 10% 步数做 warmup
@@ -204,48 +232,87 @@ def train(model, data, tokenizer, epochs=100, batch_size=32,
             print()
 
 
+# ── 共享词表 ─────────────────────────────────────────────
+
+VOCAB_PATH = "datas/vocab.json"
+BLOCK_SIZE = 128  # 诗短，128 字足够覆盖整首；训练与推理共用此值
+
+
+def get_shared_tokenizer():
+    """加载共享词表；不存在则从 唐诗+李白 并集构建并持久化。
+
+    两阶段训练的预训练与微调必须共用同一词表，否则 embedding 对不齐。
+    """
+    if os.path.exists(VOCAB_PATH):
+        return CharTokenizer.load(VOCAB_PATH)
+    corpora = [p for p in ["datas/corpus_tang.txt", "datas/corpus_libai.txt"]
+               if os.path.exists(p)]
+    tok = CharTokenizer.from_corpora(corpora)
+    tok.save(VOCAB_PATH)
+    print(f"已构建共享词表 → {VOCAB_PATH}（{tok.vocab_size} 字，来自 {len(corpora)} 个语料）")
+    return tok
+
+
+def pick_device(force_cpu):
+    if force_cpu:
+        return 'cpu'
+    if torch.cuda.is_available():
+        return 'cuda'
+    if torch.backends.mps.is_available():
+        return 'mps'
+    return 'cpu'
+
+
 # ── 主流程 ───────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # 1. 加载数据
-    text = load_data("datas/corpus_libai.txt")
-    print(f"语料长度: {len(text):,} 字符")
+    import argparse
+    parser = argparse.ArgumentParser(description="MiniGPT 训练（支持两阶段：预训练 / 微调）")
+    parser.add_argument("--data", default="datas/corpus_libai.txt", help="训练语料路径")
+    parser.add_argument("--out", default="minigpt.pt", help="模型输出路径")
+    parser.add_argument("--init-from", default=None, help="微调起点：加载已有权重再训练")
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--lr", type=float, default=None, help="不指定时：从头训用 3e-4，微调用 1e-4")
+    parser.add_argument("--cpu", action="store_true")
+    args = parser.parse_args()
 
-    # 2. 构建分词器
-    tokenizer = CharTokenizer(text)
+    # 1. 共享词表（并集，保证两阶段一致）
+    tokenizer = get_shared_tokenizer()
+    print(f"词汇表大小: {tokenizer.vocab_size}（共享词表）")
+
+    # 2. 加载训练语料
+    text = load_data(args.data)
     data = torch.tensor(tokenizer.encode(text), dtype=torch.long)
-    print(f"词汇表大小: {tokenizer.vocab_size}")
+    print(f"训练语料: {args.data}  {len(text):,} 字符 → {len(data):,} token")
 
     # 3. 创建模型
-    block_size = 128  # 诗短，128 字足够覆盖整首；训练与推理共用此值
     model = MiniGPT(
         vocab_size=tokenizer.vocab_size,
         d_model=256,
         n_heads=8,
         n_layers=6,
-        block_size=block_size,
+        block_size=BLOCK_SIZE,
     )
-    n_params = sum(p.numel() for p in model.parameters())
-    print(f"模型参数: {n_params / 1e6:.1f}M")
-    print(f"权重绑定: token_emb.weight is lm_head.weight = {model.token_emb.weight.data_ptr() == model.lm_head.weight.data_ptr()}")
+    print(f"模型参数: {sum(p.numel() for p in model.parameters()) / 1e6:.1f}M")
 
-    # 4. 设备选择（可通过命令行 --cpu 强制 CPU）
-    import sys
-    if '--cpu' in sys.argv:
-        device = 'cpu'
-    elif torch.cuda.is_available():
-        device = 'cuda'
-    elif torch.backends.mps.is_available():
-        device = 'mps'
-    else:
-        device = 'cpu'
-    print(f"训练设备: {device}")
-    print(f"每轮步数: {len(data) // (32 * block_size)}")
+    # 4. 微调：加载预训练权重
+    if args.init_from:
+        state = torch.load(args.init_from, map_location='cpu', weights_only=True)
+        model.load_state_dict(state)
+        print(f"已加载预训练权重: {args.init_from}（进入微调）")
+
+    # 5. 学习率：微调默认更小，避免冲掉预训练知识
+    lr = args.lr if args.lr is not None else (1e-4 if args.init_from else 3e-4)
+
+    device = pick_device(args.cpu)
+    print(f"训练设备: {device} | epochs: {args.epochs} | lr: {lr:.1e}")
+    print(f"每轮步数: {len(data) // (32 * BLOCK_SIZE)}")
     print()
 
-    # 5. 训练
-    train(model, data, tokenizer, epochs=100, block_size=block_size, device=device)
+    # 6. 训练
+    train(model, data, tokenizer, epochs=args.epochs,
+          block_size=BLOCK_SIZE, lr=lr, device=device)
 
-    # 6. 保存
-    torch.save(model.state_dict(), "minigpt.pt")
-    print("模型已保存到 minigpt.pt")
+    # 7. 保存
+    torch.save(model.state_dict(), args.out)
+    print(f"模型已保存到 {args.out}")
