@@ -95,6 +95,9 @@ class MiniGPT(nn.Module):
         self.lm_head = nn.Linear(d_model, vocab_size)
         self.block_size = block_size
         self.apply(self._init_weights)
+        # 权重绑定：输入 embedding 和输出 head 共享权重（GPT-2 标配）
+        # 减参数、防过拟合，小模型效果尤其明显
+        self.lm_head.weight = self.token_emb.weight
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -102,7 +105,8 @@ class MiniGPT(nn.Module):
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            # 因为权重绑定，embedding 初始化稍小以补偿
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.01)
 
     def forward(self, idx):
         B, T = idx.shape
@@ -132,16 +136,34 @@ class MiniGPT(nn.Module):
 
 # ── 训练循环 ─────────────────────────────────────────────
 
-def train(model, data, tokenizer, epochs=10, batch_size=32,
+def get_lr(it, warmup, total, max_lr):
+    """余弦学习率：warmup 线性上升 → 余弦衰减到 max_lr/10。"""
+    if it < warmup:
+        return max_lr * (it + 1) / warmup
+    if it >= total:
+        return max_lr / 10
+    ratio = (it - warmup) / max(1, total - warmup)
+    return max_lr / 10 + 0.5 * (1.0 + math.cos(math.pi * ratio)) * (max_lr - max_lr / 10)
+
+
+def train(model, data, tokenizer, epochs=100, batch_size=32,
           block_size=128, lr=3e-4, device='cpu'):
     model = model.to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.95))
     steps_per_epoch = len(data) // (batch_size * block_size)
+    total_steps = epochs * steps_per_epoch
+    warmup = total_steps // 10  # 前 10% 步数做 warmup
+    step_count = 0
 
     for epoch in range(epochs):
         model.train()
         total_loss = 0
         for step in range(steps_per_epoch):
+            # 调整学习率
+            lr_now = get_lr(step_count, warmup, total_steps, lr)
+            for g in optimizer.param_groups:
+                g['lr'] = lr_now
+
             x, y = get_batch(data, block_size, batch_size)
             x, y = x.to(device), y.to(device)
 
@@ -155,19 +177,20 @@ def train(model, data, tokenizer, epochs=10, batch_size=32,
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+            step_count += 1
 
             total_loss += loss.item()
 
             if step % 100 == 0:
-                print(f"  step {step:>4d}/{steps_per_epoch}  loss = {loss.item():.4f}")
+                print(f"  step {step:>4d}/{steps_per_epoch}  loss = {loss.item():.4f}  lr = {lr_now:.1e}")
 
         avg_loss = total_loss / steps_per_epoch
         perplexity = math.exp(avg_loss)
         print(f"epoch {epoch + 1:>2d}/{epochs}  "
               f"loss = {avg_loss:.4f}  ppl = {perplexity:.1f}")
 
-        # 每 2 轮生成一次样本
-        if epoch % 2 == 0 or epoch == epochs - 1:
+        # 每 5 轮生成一次样本
+        if epoch % 5 == 0 or epoch == epochs - 1:
             model.eval()
             # 随机取一段上下文作为 prompt
             start = torch.randint(0, len(data) - 10, (1,))
@@ -196,10 +219,11 @@ if __name__ == "__main__":
         d_model=256,
         n_heads=8,
         n_layers=6,
-        block_size=128,
+        block_size=256,
     )
     n_params = sum(p.numel() for p in model.parameters())
     print(f"模型参数: {n_params / 1e6:.1f}M")
+    print(f"权重绑定: token_emb.weight is lm_head.weight = {model.token_emb.weight.data_ptr() == model.lm_head.weight.data_ptr()}")
 
     # 4. 设备选择（可通过命令行 --cpu 强制 CPU）
     import sys
@@ -216,7 +240,7 @@ if __name__ == "__main__":
     print()
 
     # 5. 训练
-    train(model, data, tokenizer, epochs=20, device=device)
+    train(model, data, tokenizer, epochs=100, device=device)
 
     # 6. 保存
     torch.save(model.state_dict(), "minigpt.pt")

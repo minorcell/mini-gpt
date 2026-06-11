@@ -13,7 +13,7 @@ def main():
 
     # 创建模型并加载权重
     device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
-    model = MiniGPT(vocab_size=tokenizer.vocab_size)
+    model = MiniGPT(vocab_size=tokenizer.vocab_size, block_size=256)
     model.load_state_dict(torch.load("minigpt.pt", map_location=device, weights_only=True))
     model.to(device)
     model.eval()
