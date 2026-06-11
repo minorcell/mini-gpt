@@ -13,6 +13,10 @@ venv/
 *.bin
 *.safetensors
 
+# Generated data
+datas/
+train_poetry.log
+
 # IDE
 .vscode/
 .idea/

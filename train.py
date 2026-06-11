@@ -182,7 +182,7 @@ def train(model, data, tokenizer, epochs=10, batch_size=32,
 
 if __name__ == "__main__":
     # 1. 加载数据
-    text = load_data("corpus.txt")
+    text = load_data("datas/corpus_poetry.txt")
     print(f"语料长度: {len(text):,} 字符")
 
     # 2. 构建分词器
@@ -201,8 +201,11 @@ if __name__ == "__main__":
     n_params = sum(p.numel() for p in model.parameters())
     print(f"模型参数: {n_params / 1e6:.1f}M")
 
-    # 4. 设备选择
-    if torch.cuda.is_available():
+    # 4. 设备选择（可通过命令行 --cpu 强制 CPU）
+    import sys
+    if '--cpu' in sys.argv:
+        device = 'cpu'
+    elif torch.cuda.is_available():
         device = 'cuda'
     elif torch.backends.mps.is_available():
         device = 'mps'
@@ -213,7 +216,7 @@ if __name__ == "__main__":
     print()
 
     # 5. 训练
-    train(model, data, tokenizer, epochs=10, device=device)
+    train(model, data, tokenizer, epochs=5, device=device)
 
     # 6. 保存
     torch.save(model.state_dict(), "minigpt.pt")

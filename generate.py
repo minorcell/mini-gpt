@@ -8,7 +8,7 @@ from train import MiniGPT, CharTokenizer, load_data
 
 def main():
     # 加载语料构建分词器
-    text = load_data("corpus.txt")
+    text = load_data("datas/corpus_poetry.txt")
     tokenizer = CharTokenizer(text)
 
     # 创建模型并加载权重
